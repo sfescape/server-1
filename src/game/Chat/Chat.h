@@ -419,6 +419,7 @@ class MANGOS_DLL_SPEC ChatHandler
         bool HandleDebugSendQuestInvalidMsgCommand(char* args);
         bool HandleDebugSendSellErrorCommand(char* args);
         bool HandleDebugSendSpellFailCommand(char* args);
+        bool HandleDebugSendOpenBagCommand(char* args);
 
         /*
         Send the visual of the next channeled spell after args, suggested macro :
@@ -671,7 +672,6 @@ class MANGOS_DLL_SPEC ChatHandler
         bool HandleReloadLocalesGameobjectCommand(char* args);
         bool HandleReloadLocalesGossipMenuOptionCommand(char* args);
         bool HandleReloadLocalesItemCommand(char* args);
-        bool HandleReloadLocalesNpcTextCommand(char* args);
         bool HandleReloadLocalesPageTextCommand(char* args);
         bool HandleReloadLocalesPointsOfInterestCommand(char* args);
         bool HandleReloadLocalesQuestCommand(char* args);

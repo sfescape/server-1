@@ -339,6 +339,9 @@ Spell::Spell(Unit* caster, SpellEntry const *info, bool triggered, ObjectGuid or
 
     m_spellAuraHolder = nullptr;
     m_delayed = false;
+    // Must initialize to an element in the list or bad things happen,
+    // begin changes so use end
+    m_channeledUpdateIterator = m_channeledHolders.end();
 
     CleanupTargetList();
 }
@@ -453,10 +456,11 @@ void Spell::FillTargetMap()
                         // Arcane Missiles have strange targeting for auras
                         if (m_spellInfo->IsFitToFamily<SPELLFAMILY_MAGE, CF_MAGE_ARCANE_MISSILES_CHANNEL>())
                         {
-                            if (m_caster->GetTypeId() == TYPEID_PLAYER)
-                                if (Unit *target = ObjectAccessor::Instance().GetUnit(*m_caster, ((Player*)m_caster)->GetSelectionGuid()))
-                                    if (m_caster->IsValidAttackTarget(target))
-                                        tmpUnitMap.push_back(target);
+                            if (Unit* pUnitTarget = m_caster->SelectMagnetTarget(m_targets.getUnitTarget(), this, SpellEffectIndex(i)))
+                            {
+                                if (m_caster->GetTypeId() == TYPEID_PLAYER && m_caster->IsValidAttackTarget(pUnitTarget))
+                                    tmpUnitMap.push_back(pUnitTarget);
+                            }
                         }
                         else
                             SetTargetMap(SpellEffectIndex(i), m_spellInfo->EffectImplicitTargetA[i], tmpUnitMap);
@@ -545,6 +549,16 @@ void Spell::FillTargetMap()
                                 for (UnitList::iterator itr = tmpUnitMap.begin(); itr != tmpUnitMap.end();)
                                 {
                                     if (!(*itr)->HasAura(27825)) // Shadow Mark
+                                        itr = tmpUnitMap.erase(itr);
+                                    else
+                                        ++itr;
+                                }
+                                break;
+                            case 29484:
+                                // Maexxna Web Spray should not hit players under Web Wrap or Petrification
+                                for (UnitList::iterator itr = tmpUnitMap.begin(); itr != tmpUnitMap.end();)
+                                {
+                                    if ((*itr)->HasAura(17624) || (*itr)->HasAura(28622))
                                         itr = tmpUnitMap.erase(itr);
                                     else
                                         ++itr;
@@ -721,6 +735,11 @@ void Spell::prepareDataForTriggerSystem()
             if (m_attackType == OFF_ATTACK)
                 m_procAttacker |= PROC_FLAG_SUCCESSFUL_OFFHAND_HIT;
             m_procVictim   = PROC_FLAG_TAKEN_MELEE_SPELL_HIT;
+            if (IsNextMeleeSwingSpell())
+            {
+                m_procAttacker |= PROC_FLAG_SUCCESSFUL_MELEE_HIT;
+                m_procVictim |= PROC_FLAG_TAKEN_MELEE_HIT;
+            }
             break;
         case SPELL_DAMAGE_CLASS_RANGED:
             // Auto attack
@@ -774,6 +793,12 @@ void Spell::prepareDataForTriggerSystem()
                 if (aoe)
                     m_procAttacker |= PROC_FLAG_SUCCESSFUL_AOE;
 
+                if (IsSpellAppliesPeriodicAura(m_spellInfo))
+                {
+                    m_procAttacker |= PROC_FLAG_SUCCESSFUL_PERIODIC_SPELL_HIT;
+                    m_procVictim |= PROC_FLAG_TAKEN_PERIODIC_SPELL_HIT;
+                }
+
                 // Always proc with PROC_FLAG_SUCCESSFUL_SPELL_CAST if not AoE or triggered spell
                 if (!aoe && !IsTriggered())
                 {
@@ -803,6 +828,12 @@ void Spell::prepareDataForTriggerSystem()
 
                 if (aoe)
                     m_procAttacker |= PROC_FLAG_SUCCESSFUL_AOE;
+
+                if (IsSpellAppliesPeriodicAura(m_spellInfo))
+                {
+                    m_procAttacker |= PROC_FLAG_SUCCESSFUL_PERIODIC_SPELL_HIT;
+                    m_procVictim |= PROC_FLAG_TAKEN_PERIODIC_SPELL_HIT;
+                }
 
                 if (!aoe && !IsTriggered())
                 {
@@ -949,8 +980,11 @@ void Spell::CheckAtDelay(TargetInfo* pInf)
         }
     }
     if (pTarget != m_caster &&
-            (pTarget->IsImmuneToDamage(GetSpellSchoolMask(m_spellInfo)) || pTarget->IsImmuneToSpell(m_spellInfo, pTarget == m_caster)))
+            (pTarget->IsImmuneToDamage(GetSpellSchoolMask(m_spellInfo), m_spellInfo) || pTarget->IsImmuneToSpell(m_spellInfo, pTarget == m_caster)))
         pInf->missCondition = SPELL_MISS_IMMUNE;
+
+    if (pTarget->GetTypeId() == TYPEID_UNIT && ((Creature*)pTarget)->IsInEvadeMode())
+        pInf->missCondition = SPELL_MISS_EVADE;
 }
 
 void Spell::AddGOTarget(GameObject* pVictim, SpellEffectIndex effIndex)
@@ -1054,6 +1088,9 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
     if (!unit)
         return;
 
+    if (getState() == SPELL_STATE_DELAYED && (WorldTimer::getMSTime() - target->timeDelay) <= unit->m_lastSanctuaryTime && !IsPositiveSpell(m_spellInfo))
+        return;
+
     // Get original caster (if exist) and calculate damage/healing from him data
     Unit *real_caster = GetAffectiveCaster();
     // FIXME: in case wild GO heal/damage spells will be used target bonuses
@@ -1143,7 +1180,7 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
                 // can cause back attack (if detected)
                 bool backAttack = m_spellInfo->Id != 3600 && // Earthbind never set in combat
                     !IsPositiveSpell(m_spellInfo->Id) && m_caster->isVisibleForOrDetect(unit, unit, false);
-                if (IsSpellHaveAura(m_spellInfo, SPELL_AURA_MOD_POSSESS))
+                if (IsSpellHaveAura(m_spellInfo, SPELL_AURA_MOD_POSSESS) || m_spellInfo->AttributesEx3 & SPELL_ATTR_EX3_NO_INITIAL_AGGRO)
                     backAttack = false;
                 // Pickpocket can cause back attack if failed
                 if (m_spellInfo->AttributesEx & SPELL_ATTR_EX_IS_PICKPOCKET)
@@ -1453,7 +1490,7 @@ void Spell::DoSpellHitOnUnit(Unit *unit, uint32 effectMask)
 
     // Recheck immune (only for delayed spells)
     if (m_caster != unit && m_spellInfo->speed && (
-                unit->IsImmuneToDamage(GetSpellSchoolMask(m_spellInfo)) ||
+                unit->IsImmuneToDamage(GetSpellSchoolMask(m_spellInfo), m_spellInfo) ||
                 unit->IsImmuneToSpell(m_spellInfo, unit == realCaster)))
     {
         if (realCaster)
@@ -1808,7 +1845,7 @@ bool Spell::HasValidUnitPresentInTargetList()
 // Spell target first
 // Raidmates then descending by injury suffered (MaxHealth - Health)
 // Other players/mobs then descending by injury suffered (MaxHealth - Health)
-struct ChainHealingOrder : public std::binary_function<const Unit*, const Unit*, bool>
+struct ChainHealingOrder
 {
     const Unit* MainTarget;
     ChainHealingOrder(Unit const* Target) : MainTarget(Target) {};
@@ -1834,7 +1871,7 @@ struct ChainHealingOrder : public std::binary_function<const Unit*, const Unit*,
     }
 };
 
-class ChainHealingFullHealth: std::unary_function<const Unit*, bool>
+class ChainHealingFullHealth
 {
 public:
     const Unit* MainTarget;
@@ -1848,7 +1885,7 @@ public:
 
 // Helper for targets nearest to the spell target
 // The spell target is always first unless there is a target at _completely_ the same position (unbelievable case)
-struct TargetDistanceOrderNear : public std::binary_function<const Unit, const Unit, bool>
+struct TargetDistanceOrderNear
 {
     const Unit* MainTarget;
     TargetDistanceOrderNear(const Unit* Target) : MainTarget(Target) {};
@@ -3092,8 +3129,7 @@ void Spell::prepare(Aura* triggeredByAura)
 
     m_spellState = SPELL_STATE_PREPARING;
     m_delayed = m_spellInfo->speed > 0.0f 
-        || (m_spellInfo->IsCCSpell() && m_targets.getUnitTarget() && m_targets.getUnitTarget()->IsPlayer())
-        || IsSpellHaveEffect(m_spellInfo, SPELL_EFFECT_HEALTH_LEECH);
+        || (m_spellInfo->IsCCSpell() && m_targets.getUnitTarget() && m_targets.getUnitTarget()->IsPlayer());
 
     if (m_caster->GetTransport())
     {
@@ -3515,7 +3551,7 @@ void Spell::cast(bool skipCheck)
     {
         uint32 procAttacker = 0;
         // Blizzard case. Should trigger at launch for clearcast.
-        if (m_spellInfo->IsFitToFamily<SPELLFAMILY_MAGE, CF_MAGE_BLIZZARD, CF_MAGE_MISC_FROST>())
+        if (m_spellInfo->IsFitToFamily<SPELLFAMILY_MAGE, CF_MAGE_BLIZZARD>())
             procAttacker = m_procAttacker;
         else
             procAttacker = (m_procAttacker & PROC_FLAG_ON_TRAP_ACTIVATION);
@@ -3884,20 +3920,30 @@ void Spell::update(uint32 difftime)
 
                 // Must update target holder since the target will not update it. Used to keep it in sync
                 // If the cast is interrupted mid-iteration (i.e. unit dies), break
-                SpellAuraHolderList::iterator iter = m_channeledHolders.begin();
+                // Note that we cannot ensure that only 1 aura holder is removed from the list at a time
+                // during iteration, since some creature scripts force all summoned adds to despawn on
+                // death, which means that multiple units will have their auras removed at once. So
+                // we maintain an iter that points to the next holder and increment it on removals
+                m_channeledUpdateIterator = m_channeledHolders.begin();
                 SpellAuraHolderList::iterator curr;
-                while (iter != m_channeledHolders.end())
+                while (m_channeledUpdateIterator != m_channeledHolders.end())
                 {
-                    // increment now, current holder may be removed from the list externally so we need to step
-                    curr = iter;
-                    ++iter;
+                    // Store current and increment, since m_channeledUpdateIterator
+                    // may be changed externally but we still need a way to step in
+                    // this loop
+                    curr = m_channeledUpdateIterator;
+                    ++m_channeledUpdateIterator;
 
                     SpellAuraHolder *holder = *curr;
                     // Holder deleted before updating, but not removed from list. Clear usage
-                    // and remove. Use case: Cannot find caster in world to remove holder from
-                    // channeled spell in RemoveSpellAuraHolder
+                    // and remove
                     if (holder->IsDeleted())
                     {
+                        Unit *target = m_targets.getUnitTarget();
+                        sLog.outError("[Spell] - Channeled update still maintains ref to deleted holder, caster: %s. Target: %s",
+                            m_caster->GetGuidStr().c_str(), 
+                            target ? target->GetGuidStr().c_str() : "");
+
                         // TODO: Is this a leak if we don't delete it here? Unit probably removed from world
                         holder->SetInUse(false);
                         m_channeledHolders.erase(curr);
@@ -3908,19 +3954,14 @@ void Spell::update(uint32 difftime)
 
                     // Spell cast was interrupted on holder update. Unit likely died, targetted buff was
                     // dispelled, or unit ran out of range. Return since we cleaned up in
-                    // SendChannelUpdate(0) on cancel. Continuing equals segfault due to deleted
-                    // holders
+                    // SendChannelUpdate(0) on cancel. Similarly, if AoE and unit died the holder
+                    // was already removed.
                     if (m_spellState == SPELL_STATE_FINISHED)
                         return;
 
-                    // Handle typical removal modes for aura updates here for efficiency,
-                    // RemoveChanneledAuraHolder will ignore these modes. Have to check deleted
-                    // for expired holder as well, because the unit can die on the last tick
-                    // and have a non-checked remove mode. Expired holders will be cleaned up
-                    // on the unit's own update if it's from AoE. Single target cleaned up in
-                    // SendChannelUpdate(0)
+                    // We can handle typical remove modes here
                     AuraRemoveMode remove = holder->GetRemoveMode();
-                    if ((holder->GetAuraDuration() == 0 && !holder->IsDeleted()) || 
+                    if ((holder->GetAuraDuration() == 0 && !holder->IsDeleted()) ||
                             (holder->IsDeleted() && (remove == AURA_REMOVE_BY_RANGE || remove == AURA_REMOVE_BY_GROUP)))
                     {
                         holder->SetInUse(false);
@@ -4072,13 +4113,6 @@ void Spell::finish(bool ok)
     if (m_healthLeech)
         m_caster->DealHeal(m_caster, uint32(m_healthLeech), m_spellInfo);
 
-    if (IsMeleeAttackResetSpell() && !(m_spellInfo->AttributesEx2 & SPELL_ATTR_EX2_NOT_RESET_AUTO_ACTIONS))
-    {
-        m_caster->resetAttackTimer(BASE_ATTACK);
-        if (m_caster->haveOffhandWeapon())
-            m_caster->resetAttackTimer(OFF_ATTACK);
-    }
-
     /*if (IsRangedAttackResetSpell())
         m_caster->resetAttackTimer(RANGED_ATTACK);*/
 
@@ -4154,7 +4188,7 @@ void Spell::SendCastResult(SpellCastResult result)
 
 void Spell::SendCastResult(Player* caster, SpellEntry const* spellInfo, SpellCastResult result)
 {
-    WorldPacket data(SMSG_CAST_FAILED, (4 + 1 + 1));
+    WorldPacket data(SMSG_CAST_RESULT, (4 + 1 + 1));
     data << uint32(spellInfo->Id);
 
     if (result != SPELL_CAST_OK)
@@ -4457,6 +4491,24 @@ void Spell::SendLogExecute()
                 case SPELL_EFFECT_OPEN_LOCK:
                 case SPELL_EFFECT_OPEN_LOCK_ITEM:
                 case SPELL_EFFECT_DISMISS_PET:
+                case SPELL_EFFECT_TRANS_DOOR:
+                case SPELL_EFFECT_SUMMON:
+                case SPELL_EFFECT_SUMMON_PET:
+                case SPELL_EFFECT_SUMMON_WILD:
+                case SPELL_EFFECT_SUMMON_GUARDIAN:
+                case SPELL_EFFECT_SUMMON_TOTEM_SLOT1:
+                case SPELL_EFFECT_SUMMON_TOTEM_SLOT2:
+                case SPELL_EFFECT_SUMMON_TOTEM_SLOT3:
+                case SPELL_EFFECT_SUMMON_TOTEM_SLOT4:
+                case SPELL_EFFECT_SUMMON_POSSESSED:
+                case SPELL_EFFECT_SUMMON_TOTEM:
+                case SPELL_EFFECT_SUMMON_CRITTER:
+                case SPELL_EFFECT_SUMMON_OBJECT_WILD:
+                case SPELL_EFFECT_SUMMON_OBJECT_SLOT1:
+                case SPELL_EFFECT_SUMMON_OBJECT_SLOT2:
+                case SPELL_EFFECT_SUMMON_OBJECT_SLOT3:
+                case SPELL_EFFECT_SUMMON_OBJECT_SLOT4:
+                case SPELL_EFFECT_SUMMON_DEMON:
                     data << info.targetGuid;
                      break;
                  default:
@@ -4532,6 +4584,8 @@ void Spell::SendChannelUpdate(uint32 time)
 
             iter = m_channeledHolders.erase(iter);
         }
+
+        m_channeledUpdateIterator = m_channeledHolders.end();
 
         // Remove single target auras on caster now if they expired
         m_caster->RemoveAurasByCasterSpell(m_spellInfo->Id, m_caster->GetObjectGuid(), AURA_REMOVE_BY_CHANNEL);
@@ -4973,21 +5027,26 @@ void Spell::AddChanneledAuraHolder(SpellAuraHolder *holder)
 // Occurs when an aura should be removed from handling due to deletion or expiration
 void Spell::RemoveChanneledAuraHolder(SpellAuraHolder *holder, AuraRemoveMode mode)
 {
-    // AURA_REMOVE_BY_CHANNEL comes from here, don't want to double erase. other modes are handled in holder update
+    // AURA_REMOVE_BY_CHANNEL comes from here, don't want to double erase
+    // AURA_REMOVE_BY_RANGE and AURA_REMOVE_BY_GROUP are handled in Spell::update
     if (!holder || mode == AURA_REMOVE_BY_CHANNEL || mode == AURA_REMOVE_BY_GROUP || mode == AURA_REMOVE_BY_RANGE)
         return;
 
-    SpellAuraHolderList::iterator iter = m_channeledHolders.begin();
-    while (iter != m_channeledHolders.end())
+    SpellAuraHolderList::iterator iter = std::find(m_channeledHolders.begin(), m_channeledHolders.end(), holder);
+    if (iter != m_channeledHolders.end())
     {
-        if (*iter == holder)
-        {
-            (*iter)->SetInUse(false);
-            m_channeledHolders.erase(iter);
-            break;
-        }
+        (*iter)->SetInUse(false);
+
+        // If removing the aura currently being updated, increment the
+        // update iter. If this is the last element, the update iterator
+        // will be set to end() and Spell::Update will finish. If not,
+        // it will seemlessly handle the case of multiple auras being
+        // removed in a single update.
+        // Micro opt - update iter in removal rather than increment
+        if (iter == m_channeledUpdateIterator)
+            m_channeledUpdateIterator = m_channeledHolders.erase(iter);
         else
-            ++iter;
+            m_channeledHolders.erase(iter);
     }
 }
 
@@ -5141,6 +5200,11 @@ SpellCastResult Spell::CheckCast(bool strict)
                 if (m_targets.getUnitTargetGuid() != m_caster->GetReactiveTraget(REACTIVE_HUNTER_PARRY))
                     return SPELL_FAILED_BAD_TARGETS;
                 break;
+            // Reindeer Transformation only castable while mounted
+            case 25860:
+                if (!m_caster->HasAuraType(SPELL_AURA_MOUNTED))
+                    return SPELL_FAILED_ONLY_MOUNTED;
+                break; 
         }
 
         // Loatheb Corrupted Mind spell failed
@@ -5182,6 +5246,10 @@ SpellCastResult Spell::CheckCast(bool strict)
 
         if (!m_IsTriggeredSpell && IsDeathOnlySpell(m_spellInfo) && target->isAlive())
             return SPELL_FAILED_TARGET_NOT_DEAD;
+
+        // Check spell max target level
+        if (m_spellInfo->MaxTargetLevel > 0 && int32(target->getLevel()) > m_spellInfo->MaxTargetLevel)
+            return SPELL_FAILED_HIGHLEVEL;
 
         bool non_caster_target = target != m_caster && !IsSpellWithCasterSourceTargetsOnly(m_spellInfo);
 
@@ -5347,7 +5415,7 @@ SpellCastResult Spell::CheckCast(bool strict)
             }
         }
 
-        if (IsPositiveSpell(m_spellInfo->Id))
+        if (IsPositiveSpell(m_spellInfo->Id, m_caster, target))
             if (target->IsImmuneToSpell(m_spellInfo, target == m_caster))
                 return SPELL_FAILED_TARGET_AURASTATE;
 
@@ -6004,6 +6072,26 @@ SpellCastResult Spell::CheckCast(bool strict)
                 }
                 break;
             }
+            case SPELL_EFFECT_ACTIVATE_OBJECT:
+            {
+                if (m_spellInfo->Id == 15958)
+                { 
+                    if (m_UniqueGOTargetInfo.size())
+                    {
+                        ObjectGuid eggGuid = m_UniqueGOTargetInfo.back().targetGUID;
+                        if (GameObject* pRookeryEgg = m_caster->GetMap()->GetGameObject(eggGuid))
+                        {
+                            if (pRookeryEgg->GetGoState() != GO_STATE_ACTIVE_ALTERNATIVE)
+                                return SPELL_FAILED_BAD_TARGETS;
+                        }
+                        else
+                            return SPELL_FAILED_BAD_IMPLICIT_TARGETS;
+                    }
+                    else
+                        return SPELL_FAILED_BAD_IMPLICIT_TARGETS;
+                }
+                break;
+            }
             case SPELL_EFFECT_SUMMON_DEAD_PET:
             {
                 Creature *pet = m_caster->GetPet();
@@ -6168,7 +6256,13 @@ SpellCastResult Spell::CheckCast(bool strict)
                     {
                         bool positive = holder->IsPositive();
                         // do not remove positive auras if friendly target
-                        //               negative auras if non-friendly target
+                        // do not remove negative auras if non-friendly target
+                        // when removing charm auras ignore hostile reaction from the charm
+                        if (!friendly_dispel && !positive && IsCharmSpell(holder->GetSpellProto()))
+                            if (CharmInfo *charm = unit_target->GetCharmInfo())
+                                if (FactionTemplateEntry const* ft = charm->GetOriginalFactionTemplate())
+                                    if (charm->GetOriginalFactionTemplate()->IsFriendlyTo(*m_caster->getFactionTemplateEntry()))
+                                        bFoundOneDispell = true;
                         if (positive == friendly_dispel)
                             continue;
                     }
@@ -7059,7 +7153,6 @@ SpellCastResult Spell::CheckItems()
         case  5699:
         case 11729:
         case 11730:
-        case 27230:
         {
             if (!p_caster)
                 break;
@@ -7080,14 +7173,13 @@ SpellCastResult Spell::CheckItems()
                 }
             }
 
-            static uint32 const itypes[6][3] =
+            static uint32 const itypes[5][3] =
             {
                 { 5512, 19004, 19005},              // Minor Healthstone
                 { 5511, 19006, 19007},              // Lesser Healthstone
                 { 5509, 19008, 19009},              // Healthstone
                 { 5510, 19010, 19011},              // Greater Healthstone
                 { 9421, 19012, 19013},              // Major Healthstone
-                {22103, 22104, 22105}               // Master Healthstone
             };
 
             switch (m_spellInfo->Id)
@@ -7107,9 +7199,6 @@ SpellCastResult Spell::CheckItems()
                 case 11730:
                     itemtype = itypes[4][rank];
                     break; // Major Healthstone
-                case 27230:
-                    itemtype = itypes[5][rank];
-                    break; // Master Healthstone
             }
 
             ItemPosCountVec dest;
@@ -7840,7 +7929,7 @@ public:
                     break;
                 case SPELL_TARGETS_AOE_DAMAGE:
                 {
-                    if (itr->getSource()->GetTypeId() == TYPEID_UNIT && ((Creature*)itr->getSource())->IsTotem())
+                    if (itr->getSource()->GetTypeId() == TYPEID_UNIT && ((Creature*)itr->getSource())->IsImmuneToAoe())
                         continue;
 
                     if (Unit* sourceUnit = itr->getSource()->ToUnit())

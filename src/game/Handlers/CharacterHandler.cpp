@@ -384,7 +384,7 @@ void WorldSession::HandleCharDeleteOpcode(WorldPacket & recv_data)
     if (sGuildMgr.GetGuildByLeader(guid))
     {
         WorldPacket data(SMSG_CHAR_DELETE, 1);
-        data << (uint8)CHAR_DELETE_FAILED_GUILD_LEADER;
+        data << (uint8)CHAR_DELETE_FAILED;
         SendPacket(&data);
         return;
     }
@@ -651,6 +651,8 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder *holder)
             pCurrChar->TeleportTo(at->target_mapId, at->target_X, at->target_Y, at->target_Z, pCurrChar->GetOrientation());
         else
             pCurrChar->TeleportToHomebind();
+
+        sMapMgr.ExecuteSingleDelayedTeleport(pCurrChar);
     }
 
     if (alreadyOnline)
@@ -787,15 +789,6 @@ void WorldSession::HandleSetFactionAtWarOpcode(WorldPacket & recv_data)
     recv_data >> flag;
 
     GetPlayer()->GetReputationMgr().SetAtWar(repListID, flag);
-}
-
-void WorldSession::HandleMeetingStoneInfoOpcode(WorldPacket & /*recv_data*/)
-{
-    DEBUG_LOG("WORLD: Received CMSG_MEETING_STONE_INFO");
-
-    WorldPacket data(SMSG_MEETINGSTONE_SETQUEUE, 5);
-    data << uint32(0) << uint8(6);
-    SendPacket(&data);
 }
 
 void WorldSession::HandleTutorialFlagOpcode(WorldPacket & recv_data)
@@ -943,4 +936,5 @@ void WorldSession::HandleChangePlayerNameOpcodeCallBack(QueryResult *result, uin
     session->SendPacket(&data);
 
     sObjectMgr.ChangePlayerNameInCache(guidLow, oldname, newname);
+    sWorld.InvalidatePlayerDataToAllClient(guid);
 }

@@ -760,11 +760,13 @@ void AreaAura::Update(uint32 diff)
         // or caster is (no longer) friendly
         bool needFriendly = (m_areaAuraType == AREA_AURA_ENEMY ? false : true);
         if (!caster || caster->hasUnitState(UNIT_STAT_ISOLATED) ||
-                !caster->IsWithinDistInMap(target, m_radius)        ||
-                !caster->HasAura(GetId(), GetEffIndex())            ||
+                !caster->IsWithinDistInMap(target, m_radius) ||
+                !caster->HasAura(GetId(), GetEffIndex()) ||
                 caster->IsFriendlyTo(target) != needFriendly
-           )
+            )
+        {
             target->RemoveSingleAuraFromSpellAuraHolder(GetId(), GetEffIndex(), GetCasterGuid(), AURA_REMOVE_BY_RANGE);
+        }
         else if (m_areaAuraType == AREA_AURA_PARTY)         // check if in same sub group
         {
             // not check group if target == owner or target == pet
@@ -817,10 +819,13 @@ void PersistentAreaAura::Update(uint32 diff)
         }
     }
 
-    Aura::Update(diff);
-
+    // Note: Unit may have been removed from the world (mid-teleport) during this
+    // update (since the caster updates area auras). We shouldn't be ticking it
+    // when the target is out of range anyway.
     if (remove)
         GetTarget()->RemoveSingleAuraFromSpellAuraHolder(GetHolder(), m_effIndex, AURA_REMOVE_BY_RANGE);
+    else
+        Aura::Update(diff);
 }
 
 void Aura::ApplyModifier(bool apply, bool Real, bool skipCheckExclusive)
@@ -1771,10 +1776,7 @@ void Aura::HandleAuraDummy(bool apply, bool Real)
                 if (Unit* caster = GetCaster())
                     if (Player* casterPlayer = caster->ToPlayer())
                         if (Pet* guardian = caster->FindGuardianWithEntry(4277))
-                        {
-                            casterPlayer->ModPossessPet(guardian, false, AURA_REMOVE_BY_DEFAULT);
-                            guardian->DisappearAndDie();
-                        }
+                            guardian->DisappearAndDie(); // Removes mod posses
                 return;
             case 10255:                                     // Stoned
             {
@@ -1791,10 +1793,8 @@ void Aura::HandleAuraDummy(bool apply, bool Real)
                 if (Unit* caster = GetCaster())
                     if (Player* casterPlayer = caster->ToPlayer())
                         if (Pet* guardian = caster->FindGuardianWithEntry(7863))
-                        {
-                            casterPlayer->ModPossessPet(guardian, false, AURA_REMOVE_BY_DEFAULT);
                             guardian->DisappearAndDie();
-                        }
+
                 return;
             case 11826:
                 if (m_removeMode != AURA_REMOVE_BY_EXPIRE)
@@ -2309,6 +2309,12 @@ void Aura::HandleAuraModShapeshift(bool apply, bool Real)
             }
 
             break;
+        }
+        case FORM_BERSERKERSTANCE:
+        {
+            // do nothing when removing Nefarian warrior call
+            if (!apply && GetSpellProto()->Id == 23397)
+                return;
         }
         default:
             break;
@@ -2862,9 +2868,10 @@ void Unit::ModPossess(Unit* target, bool apply, AuraRemoveMode m_removeMode)
 
     if (apply)
     {
+        FactionTemplateEntry const* origFactionTemplate = target->getFactionTemplateEntry();
         target->addUnitState(UNIT_STAT_CONTROLLED);
 
-        target->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED | UNIT_FLAG_PVP_ATTACKABLE);
+        target->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED);
         target->SetCharmerGuid(caster->GetObjectGuid());
         target->setFaction(caster->getFaction());
 
@@ -2882,6 +2889,7 @@ void Unit::ModPossess(Unit* target, bool apply, AuraRemoveMode m_removeMode)
             charmInfo->InitPossessCreateSpells();
             charmInfo->SetReactState(REACT_PASSIVE);
             charmInfo->SetCommandState(COMMAND_STAY);
+            charmInfo->SetOriginalFactionTemplate(origFactionTemplate);
         }
 
         p_caster->PossessSpellInitialize();
@@ -2925,9 +2933,6 @@ void Unit::ModPossess(Unit* target, bool apply, AuraRemoveMode m_removeMode)
         target->clearUnitState(UNIT_STAT_CONTROLLED);
 
         target->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED);
-        // removing UNIT_FLAG_PVP_ATTACKABLE from a player now has weird consequences like walking underwater
-        if (!target->GetAffectingPlayer())
-            target->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PVP_ATTACKABLE);
 
         target->SetCharmerGuid(ObjectGuid());
 
@@ -2998,6 +3003,7 @@ void Player::ModPossessPet(Pet* pet, bool apply, AuraRemoveMode m_removeMode)
 
         pet->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PLAYER_CONTROLLED);
         pet->SetCharmerGuid(p_caster->GetObjectGuid());
+        pet->SetPossesorGuid(p_caster->GetObjectGuid());
 
         pet->StopMoving();
         pet->GetMotionMaster()->Clear(false);
@@ -3022,6 +3028,7 @@ void Player::ModPossessPet(Pet* pet, bool apply, AuraRemoveMode m_removeMode)
         camera.ResetView();
         pet->UpdateControl();
         pet->SetCharmerGuid(ObjectGuid());
+        pet->SetPossesorGuid(ObjectGuid());
 
         // To avoid moving the wrong unit on server side between cancellation and mover swap
         // the pet has the controlled state removed in WorldSession::HandleSetActiveMoverOpcode
@@ -3045,6 +3052,8 @@ void Aura::HandleModCharm(bool apply, bool Real)
     {
         if (!caster)
             return;
+
+        FactionTemplateEntry const* origFactionTemplate = target->getFactionTemplateEntry();
 
         // is it really need after spell check checks?
         target->RemoveSpellsCausingAura(SPELL_AURA_MOD_CHARM, GetHolder());
@@ -3071,6 +3080,7 @@ void Aura::HandleModCharm(bool apply, bool Real)
         charmInfo->SetIsReturning(true);
         charmInfo->SetIsCommandFollow(true);
         charmInfo->SetIsFollowing(false);
+        charmInfo->SetOriginalFactionTemplate(origFactionTemplate);
 
         target->AttackStop();
         target->InterruptNonMeleeSpells(false);
@@ -3657,26 +3667,6 @@ void Aura::HandleAuraModSilence(bool apply, bool Real)
                 if (spell->m_spellInfo->PreventionType == SPELL_PREVENTION_TYPE_SILENCE)
                     // Stop spells on prepare or casting state
                     target->InterruptSpell(CurrentSpellTypes(i), false);
-
-        switch (GetId())
-        {
-            // Arcane Torrent (Energy)
-            case 25046:
-            {
-                Unit * caster = GetCaster();
-                if (!caster)
-                    return;
-
-                // Search Mana Tap auras on caster
-                Aura * dummy = caster->GetDummyAura(28734);
-                if (dummy)
-                {
-                    int32 bp = dummy->GetStackAmount() * 10;
-                    caster->CastCustomSpell(caster, 25048, &bp, nullptr, nullptr, true);
-                    caster->RemoveAurasDueToSpell(28734);
-                }
-            }
-        }
     }
     else
     {
@@ -4493,7 +4483,6 @@ void Aura::HandleAuraModIncreaseHealth(bool apply, bool Real)
     switch (GetId())
     {
         case 12976:                                         // Warrior Last Stand triggered spell
-        case 28726:                                         // Nightmare Seed ( Nightmare Seed )
         {
             if (Real)
             {
@@ -5071,6 +5060,12 @@ void Aura::HandleShapeshiftBoosts(bool apply)
             else
                 ++itr;
         }
+
+        // Interrupt current shape specific spells
+        for (uint32 i = CURRENT_MELEE_SPELL; i < CURRENT_MAX_SPELL; ++i)
+            if (Spell* spell = target->GetCurrentSpell(CurrentSpellTypes(i)))
+                if (IsRemovedOnShapeLostSpell(spell->m_spellInfo))
+                    target->InterruptSpell(CurrentSpellTypes(i), false);
     }
 }
 
@@ -5280,7 +5275,7 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
                 return;
 
             // Check for immune (not use charges)
-            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto)) && !(spellProto->Attributes & SPELL_ATTR_UNAFFECTED_BY_INVULNERABILITY))
+            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto), spellProto))
                 return;
 
             uint32 absorb = 0;
@@ -5402,7 +5397,7 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
                 return;
 
             // Check for immune
-            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto)))
+            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto), spellProto))
                 return;
 
             uint32 absorb = 0;
@@ -5572,7 +5567,7 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
                 return;
 
             // Check for immune (not use charges)
-            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto)))
+            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto), spellProto))
                 return;
 
             // ignore non positive values (can be result apply spellmods to aura damage
@@ -5696,7 +5691,7 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
                 return;
 
             // Check for immune (not use charges)
-            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto)))
+            if (target->IsImmuneToDamage(GetSpellSchoolMask(spellProto), spellProto))
                 return;
 
             int32 pdamage = m_modifier.m_amount > 0 ? m_modifier.m_amount : 0;
@@ -5862,7 +5857,7 @@ void Aura::HandlePreventFleeing(bool apply, bool Real)
         if (apply)
             GetTarget()->SetFeared(false, fearAuras.front()->GetCasterGuid());
         else
-            GetTarget()->SetFeared(true);
+            GetTarget()->SetFeared(true, fearAuras.front()->GetCasterGuid(), fearAuras.front()->GetId());
     }
 }
 
@@ -5925,10 +5920,8 @@ SpellAuraHolder::SpellAuraHolder(SpellEntry const* spellproto, Unit *target, Wor
     m_procCharges    = spellproto->procCharges;
     m_isChanneled    = IsChanneledSpell(spellproto);
 
-    m_isRemovedOnShapeLost = (m_casterGuid == m_target->GetObjectGuid() &&
-                              (m_spellProto->Stances || m_spellProto->Id == 24864) &&
-                              !(m_spellProto->AttributesEx2 & SPELL_ATTR_EX2_NOT_NEED_SHAPESHIFT) &&
-                              !(m_spellProto->Attributes & SPELL_ATTR_NOT_SHAPESHIFT));
+    m_isRemovedOnShapeLost = m_casterGuid == m_target->GetObjectGuid() && IsRemovedOnShapeLostSpell(m_spellProto);
+
     // Exceptions
     // Attaques circulaires
     if (m_spellProto->Id == 12292)
@@ -6451,6 +6444,39 @@ void SpellAuraHolder::HandleSpellSpecificBoosts(bool apply)
     }
 
     SetInUse(false);
+}
+
+void SpellAuraHolder::HandleCastOnAuraRemoval() const
+{
+    uint32 uiTriggeredSpell = 0;
+    AuraRemoveMode mode = GetRemoveMode();
+
+    switch (GetId())
+    {
+        case 26180:
+        {
+            if (mode == AURA_REMOVE_BY_DISPEL)
+                uiTriggeredSpell = 26233;        // Wyvern Sting (AQ40, Princess Huhuran)
+            break;
+        }
+        case 24002:
+        case 24003:
+        {
+            if (mode == AURA_REMOVE_BY_EXPIRE)
+                uiTriggeredSpell = 24004;        // Tranquilizing Poison (ZG, Razzashi Serpent)
+            break;
+        }
+        default:
+            return;
+    }
+
+    if (uiTriggeredSpell)
+    {
+        if (Unit* caster = GetCaster())
+            caster->CastSpell(GetTarget(), uiTriggeredSpell, true);
+        else
+            GetTarget()->CastSpell(GetTarget(), uiTriggeredSpell, true);
+    }
 }
 
 void Aura::HandleAuraSafeFall(bool Apply, bool Real)
@@ -7094,6 +7120,7 @@ bool _IsExclusiveSpellAura(SpellEntry const* spellproto, SpellEffectIndex eff, A
         case 25661: // Bouffe +25 Endu
         case 24427: // Diamond Flask
         case 17528: // Mighty Rage Potion
+        case 23697: // Alterac Spring Water
             return false;
 
         case 17538: // Le +crit du buff de l'Elixir de la Mangouste 17538, devrait se stack avec TOUT.

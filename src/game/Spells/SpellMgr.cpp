@@ -284,7 +284,7 @@ float CalculateDefaultCoefficient(SpellEntry const *spellProto, DamageEffectType
 }
 
 
-float CalculateCustomCoefficient(SpellEntry const *spellProto, Unit const* caster, DamageEffectType const damageType, float coeff, Spell* spell)
+float CalculateCustomCoefficient(SpellEntry const *spellProto, Unit const* caster, DamageEffectType const damageType, float coeff, Spell* spell, bool donePart)
 {
     if (!caster)
         return coeff;
@@ -314,6 +314,11 @@ float CalculateCustomCoefficient(SpellEntry const *spellProto, Unit const* caste
 
                     return speed * coeff;
                 }
+                // Seal of Command
+                if (spellProto->Id == 20424)
+                {
+                    return donePart ? 0.20f : 0.29f;
+                }
             }
             case SPELLFAMILY_SHAMAN:
             {
@@ -323,8 +328,19 @@ float CalculateCustomCoefficient(SpellEntry const *spellProto, Unit const* caste
                 // Chain Lightning / Chain Heal / Healing Wave (T1 8/8 bonus)
                 if (spellProto->IsFitToFamilyMask(UI64LIT(0x00000000142)))
                 {
+                    float multiplier = spellProto->DmgMultiplier[0];
+
+                    if (spell->GetTargetNum() > 1)
+                    {
+                        if (Player* modOwner = caster->GetSpellModOwner())
+                        {
+                            // Improved Chain Heal (T2 3/8 bonus) / Gift of the Gathering Storm Chain Lightning Bonus
+                            modOwner->ApplySpellMod(spell->m_spellInfo->Id, SPELLMOD_EFFECT_PAST_FIRST, multiplier, spell);
+                        }
+                    }
+
                     for (uint8 i = 1; i < spell->GetTargetNum(); ++i)
-                        coeff *= spellProto->DmgMultiplier[0];
+                        coeff *= multiplier;
                     return coeff;
                 }
             }
@@ -738,8 +754,12 @@ bool IsPositiveEffect(SpellEntry const *spellproto, SpellEffectIndex effIndex, U
         // Dispel can be positive or negative depending on the target
         case SPELL_EFFECT_DISPEL:
             if (caster && victim)
+            {
+                if (CharmInfo *charm = victim->GetCharmInfo())
+                    if (FactionTemplateEntry const* ft = charm->GetOriginalFactionTemplate())
+                        return ft->IsFriendlyTo(*caster->getFactionTemplateEntry());
                 return caster->IsFriendlyTo(victim);
-
+            }
         // non-positive aura use
         case SPELL_EFFECT_APPLY_AURA:
         {
@@ -825,8 +845,11 @@ bool IsPositiveEffect(SpellEntry const *spellproto, SpellEffectIndex effIndex, U
                     if (spellproto->Id == 24740)            // Wisp Costume
                         return true;
                     return false;
-                case SPELL_AURA_MOD_ROOT:
                 case SPELL_AURA_MOD_SILENCE:
+                    if (spellproto->Id == 24732)            // Bat Costume
+                        return true;
+                    return false;
+                case SPELL_AURA_MOD_ROOT:
                 case SPELL_AURA_GHOST:
                 case SPELL_AURA_PERIODIC_LEECH:
                 case SPELL_AURA_MOD_STALKED:
@@ -1714,7 +1737,7 @@ bool SpellMgr::IsSpellProcEventCanTriggeredBy(SpellProcEventEntry const * spellP
         if (procEvent_procEx & PROC_EX_EX_TRIGGER_ALWAYS)
             return true;
         // Exist req for PROC_EX_NO_PERIODIC
-        if ((procEvent_procEx & PROC_EX_NO_PERIODIC) && (procFlags & (PROC_FLAG_ON_DO_PERIODIC | PROC_FLAG_ON_TAKE_PERIODIC)))
+        if ((procEvent_procEx & PROC_EX_NO_PERIODIC) && (procFlags & (PROC_FLAG_ON_DO_PERIODIC | PROC_FLAG_ON_TAKE_PERIODIC | PROC_FLAG_SUCCESSFUL_PERIODIC_SPELL_HIT | PROC_FLAG_TAKEN_PERIODIC_SPELL_HIT)))
             return false;
         // Check Extra Requirement like (hit/crit/miss/resist/parry/dodge/block/immune/reflect/absorb and other)
         if (procEvent_procEx & procExtra)

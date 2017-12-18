@@ -24,7 +24,8 @@
 #include "CreatureAI.h"
 
 TemporarySummon::TemporarySummon(ObjectGuid summoner) :
-    Creature(CREATURE_SUBTYPE_TEMPORARY_SUMMON), m_type(TEMPSUMMON_TIMED_OR_CORPSE_DESPAWN), m_timer(0), m_lifetime(0), m_summoner(summoner), m_forceTargetUpdateTimer(1000)
+    Creature(CREATURE_SUBTYPE_TEMPORARY_SUMMON), m_type(TEMPSUMMON_TIMED_OR_CORPSE_DESPAWN), m_timer(0), m_lifetime(0), m_summoner(summoner),
+    m_forceTargetUpdateTimer(1000), m_unSummonInformed(false)
 {
 }
 
@@ -237,13 +238,42 @@ void TemporarySummon::UnSummon(uint32 delayDespawnTime /*= 0*/)
     {
         CombatStop();
 
-        if (GetSummonerGuid().IsCreature())
-            if (Creature* sum = GetMap()->GetCreature(GetSummonerGuid()))
-                if (sum->AI())
-                    sum->AI()->SummonedCreatureDespawn(this);
+        InformSummonerOfDespawn();
 
         AddObjectToRemoveList();
     }
+}
+
+void TemporarySummon::InformSummonerOfDespawn()
+{
+    if (m_unSummonInformed)
+        return;
+
+    m_unSummonInformed = true;
+    if (WorldObject* pSummoner = GetMap()->GetWorldObject(GetSummonerGuid()))
+    {
+        pSummoner->DecrementSummonCounter();
+
+        if (Creature* cOwner = pSummoner->ToCreature())
+            if (cOwner->AI())
+                cOwner->AI()->SummonedCreatureDespawn(this);
+    }
+}
+
+void TemporarySummon::CleanupsBeforeDelete()
+{
+    InformSummonerOfDespawn();
+
+    Creature::CleanupsBeforeDelete();
+}
+
+TemporarySummon::~TemporarySummon()
+{
+    // If this object is deleted before being unsummoned, log an error.
+    // By this stage it is too late to correctly unsummon the unit, since
+    // we have already been removed from the map.
+    if (!m_unSummonInformed)
+        sLog.outError("TemporarySummon %s deleted before being unsummed - summoner will retain incorrect count", GetGuidStr().c_str());
 }
 
 void TemporarySummon::SaveToDB()

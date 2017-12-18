@@ -159,6 +159,7 @@ void AddSC_boss_timmy_the_cruel();
 void AddSC_boss_postmaster_malown();
 void AddSC_boss_baron_rivendare();
 void AddSC_boss_dathrohan_balnazzar();
+void AddSC_boss_atiesh();
 void AddSC_instance_stratholme();
 void AddSC_stratholme();
 void AddSC_instance_sunken_temple();                 //sunken_temple
@@ -218,6 +219,7 @@ void AddSC_boss_landslide();
 void AddSC_boss_noxxion();
 void AddSC_boss_ptheradras();
 void AddSC_maraudon();
+void AddSC_instance_maraudon();
 void AddSC_boss_onyxia();                            //onyxias_lair
 void AddSC_boss_amnennar_the_coldbringer();          //razorfen_downs
 void AddSC_razorfen_downs();
@@ -271,6 +273,7 @@ void AddSC_thousand_needles();
 void AddSC_thunder_bluff();
 void AddSC_ungoro_crater();
 void AddSC_winterspring();
+void AddSC_war_effort();
 
 void AddSC_npc_j_eevee();                            // J'Eevee, the Imp in a Jar
 
@@ -316,6 +319,8 @@ void AddScripts()
     AddSC_world_event_naxxramas();
     AddSC_event_scourge_invasion();
     AddSC_spell_scripts();
+
+    AddSC_war_effort();
 
     //eastern kingdoms
     AddSC_blackrock_depths();                               //blackrock_depths
@@ -428,6 +433,7 @@ void AddScripts()
     AddSC_boss_postmaster_malown();
     AddSC_boss_baron_rivendare();
     AddSC_boss_dathrohan_balnazzar();
+    AddSC_boss_atiesh();
     AddSC_instance_stratholme();
     AddSC_stratholme();
     AddSC_instance_sunken_temple();                         //sunken_temple
@@ -487,6 +493,7 @@ void AddScripts()
     AddSC_boss_noxxion();
     AddSC_boss_ptheradras();
     AddSC_maraudon();
+    AddSC_instance_maraudon();
     AddSC_boss_onyxia();                                    //onyxias_lair
     AddSC_boss_amnennar_the_coldbringer();                  //razorfen_downs
     AddSC_razorfen_downs();
